@@ -1,0 +1,190 @@
+name: Batch Deploy Gate Mock
+
+# Rehearsal of the per-server approval pause: plan -> approve -> deploy -> approve -> deploy.
+# Nothing real is deployed - every "deploy" is an echo with a short sleep.
+# The gates point at the environment `batch-gate-test`; its required reviewers
+# see a "Review deployments" prompt and click Approve or Reject.
+#
+# Run from a PUBLIC repo on the default branch: free-plan orgs get neither hosted
+# runners in private repos nor required reviewers on private-repo environments,
+# and a new workflow is only dispatchable from the default branch.
+# Keep every name in this file synthetic for that reason.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_1:
+        description: "App 1 (pick at least one)"
+        type: choice
+        default: '-'
+        options: &app_list
+          - '-'
+          - app-alpha
+          - app-beta
+          - app-gamma
+      app_2:
+        description: "App 2"
+        type: choice
+        default: '-'
+        options: *app_list
+      server_1:
+        description: "Server 1 (servers run one after another)"
+        type: choice
+        default: '-'
+        options: &server_list
+          - '-'
+          - server-a
+          - server-b
+      server_2:
+        description: "Server 2"
+        type: choice
+        default: '-'
+        options: *server_list
+      dry_run:
+        description: "Dry run: show the plan only. Uncheck to run the gated waves."
+        type: boolean
+        default: true
+
+concurrency:
+  group: gate-mock
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      apps_json: ${{ steps.plan.outputs.apps_json }}
+      servers_json: ${{ steps.plan.outputs.servers_json }}
+    steps:
+      - name: Collect the slots and build the waves
+        id: plan
+        env:
+          APPS: |
+            ${{ inputs.app_1 }}
+            ${{ inputs.app_2 }}
+          SERVERS: |
+            ${{ inputs.server_1 }}
+            ${{ inputs.server_2 }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          pick() { printf '%s\n' "$1" | awk '{gsub(/^[ \t]+|[ \t]+$/, "")} $0 != "" && $0 != "-" && !seen[$0]++'; }
+          apps=$(pick "$APPS"); servers=$(pick "$SERVERS")
+          [ -n "$apps" ]    || { echo "::error::Pick at least one app."; exit 1; }
+          [ -n "$servers" ] || { echo "::error::Pick at least one server."; exit 1; }
+          echo "apps_json=$(jq -cnR '[inputs]' <<<"$apps")"       >> "$GITHUB_OUTPUT"
+          echo "servers_json=$(jq -cnR '[inputs]' <<<"$servers")" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Plan"
+            echo
+            echo "| # | App | Server |"
+            echo "|--:|---|---|"
+            i=0
+            while read -r s; do
+              while read -r a; do i=$((i+1)); echo "| $i | $a | $s |"; done <<<"$apps"
+            done <<<"$servers"
+            echo
+            if [ "$DRY" = "true" ]; then
+              echo "**Dry run - nothing runs.** Untick *dry_run* to see the gates."
+            else
+              echo "Each server waits for an approval before its deploys start."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Referencing a missing environment silently CREATES it ungated and the run
+      # would sail through with no pause - fail closed instead (same pattern as the
+      # real prod gate).
+      - name: Refuse to run if the gate environment is not protected
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rules=$(gh api "repos/$GITHUB_REPOSITORY/environments/batch-gate-test" \
+                   --jq '[.protection_rules[] | select(.type=="required_reviewers")] | length' 2>/dev/null || echo 0)
+          if [ "${rules:-0}" -eq 0 ]; then
+            echo "::error::environment 'batch-gate-test' is missing or has no required reviewers - the gates would not pause. Configure it first."
+            exit 1
+          fi
+
+  gate_1:
+    name: Approve server 1
+    needs: plan
+    if: ${{ !inputs.dry_run && fromJSON(needs.plan.outputs.servers_json)[0] != null }}
+    runs-on: ubuntu-latest
+    environment: batch-gate-test
+    steps:
+      - name: Approved
+        run: echo "Server 1 (${{ fromJSON(needs.plan.outputs.servers_json)[0] }}) approved - in the real flow it must be out of the load balancer now."
+
+  deploy_1:
+    name: Deploy ${{ matrix.app }} -> ${{ fromJSON(needs.plan.outputs.servers_json)[0] }}
+    needs: [plan, gate_1]
+    if: ${{ !cancelled() && needs.gate_1.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps_json) }}
+    steps:
+      - name: Mock deploy
+        run: |
+          echo "Deploying ${{ matrix.app }} to ${{ fromJSON(needs.plan.outputs.servers_json)[0] }} (mock, nothing real)"
+          sleep 20
+
+  gate_2:
+    name: Approve server 2
+    needs: [plan, deploy_1]
+    if: ${{ !cancelled() && needs.deploy_1.result == 'success' && fromJSON(needs.plan.outputs.servers_json)[1] != null }}
+    runs-on: ubuntu-latest
+    environment: batch-gate-test
+    steps:
+      - name: Approved
+        run: echo "Server 2 (${{ fromJSON(needs.plan.outputs.servers_json)[1] }}) approved - in the real flow it must be out of the load balancer now."
+
+  deploy_2:
+    name: Deploy ${{ matrix.app }} -> ${{ fromJSON(needs.plan.outputs.servers_json)[1] }}
+    needs: [plan, gate_2]
+    if: ${{ !cancelled() && needs.gate_2.result == 'success' }}
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        app: ${{ fromJSON(needs.plan.outputs.apps_json) }}
+    steps:
+      - name: Mock deploy
+        run: |
+          echo "Deploying ${{ matrix.app }} to ${{ fromJSON(needs.plan.outputs.servers_json)[1] }} (mock, nothing real)"
+          sleep 20
+
+  report:
+    name: Report
+    needs: [plan, gate_1, deploy_1, gate_2, deploy_2]
+    if: ${{ always() && !inputs.dry_run && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fold the outcome
+        env:
+          G1: ${{ needs.gate_1.result }}
+          D1: ${{ needs.deploy_1.result }}
+          G2: ${{ needs.gate_2.result }}
+          D2: ${{ needs.deploy_2.result }}
+          SERVERS: ${{ needs.plan.outputs.servers_json }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Result"
+            echo
+            echo "| Server | Approve | Deploy |"
+            echo "|---|---|---|"
+            echo "| $(jq -r '.[0]' <<<"$SERVERS") | $G1 | $D1 |"
+            S2=$(jq -r '.[1] // empty' <<<"$SERVERS")
+            if [ -n "$S2" ]; then
+              echo "| $S2 | $G2 | $D2 |"
+            fi
+            echo
+            echo "A rejected approval shows as *failure* on its gate; every later wave stays *skipped* (= not run)."
+          } >> "$GITHUB_STEP_SUMMARY"
