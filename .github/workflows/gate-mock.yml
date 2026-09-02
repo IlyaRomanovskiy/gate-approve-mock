@@ -101,9 +101,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # gh prints the error body to stdout on 404 - keep the fallback OUTSIDE
+          # the substitution, or rules ends up as JSON + '0'.
           rules=$(gh api "repos/$GITHUB_REPOSITORY/environments/batch-gate-test" \
-                   --jq '[.protection_rules[] | select(.type=="required_reviewers")] | length' 2>/dev/null || echo 0)
-          if [ "${rules:-0}" -eq 0 ]; then
+                   --jq '[.protection_rules[] | select(.type=="required_reviewers")] | length' 2>/dev/null) || rules=0
+          case "$rules" in (*[!0-9]*|"") rules=0;; esac
+          if [ "$rules" -eq 0 ]; then
             echo "::error::environment 'batch-gate-test' is missing or has no required reviewers - the gates would not pause. Configure it first."
             exit 1
           fi
