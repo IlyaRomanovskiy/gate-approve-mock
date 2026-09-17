@@ -1,0 +1,58 @@
+name: Matrix naming probe
+
+# Probe: how does GitHub display a matrix job that is skipped, and what does an
+# empty matrix do? Answers whether an unused deploy path can be hidden instead
+# of rendering its raw name template.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "which case to exercise"
+        type: choice
+        default: skip
+        options: [skip, empty]
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.p.outputs.legs }}
+      empty: ${{ steps.p.outputs.empty }}
+    steps:
+      - id: p
+        run: |
+          echo 'legs=[{"app":"demo-svc-accounts-sys","server":"demo-internal-prod-1"}]' >> "$GITHUB_OUTPUT"
+          echo 'empty=[]' >> "$GITHUB_OUTPUT"
+
+  # A: custom dynamic name, skipped by if -> what we have today
+  a_named_skipped:
+    name: ${{ matrix.leg.app }} -> ${{ matrix.leg.server }}
+    needs: plan
+    if: ${{ false }}
+    strategy:
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo a" }]
+
+  # B: no custom name at all, skipped by if
+  b_unnamed_skipped:
+    needs: plan
+    if: ${{ false }}
+    strategy:
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.legs) }}
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo b" }]
+
+  # C: empty matrix - does the job vanish, or does the run fail?
+  c_empty_matrix:
+    name: ${{ matrix.leg.app }} -> ${{ matrix.leg.server }}
+    needs: plan
+    if: ${{ inputs.mode == 'empty' }}
+    strategy:
+      matrix:
+        leg: ${{ fromJSON(needs.plan.outputs.empty) }}
+    runs-on: ubuntu-latest
+    steps: [{ run: "echo c" }]
