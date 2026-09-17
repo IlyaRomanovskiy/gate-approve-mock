@@ -11,7 +11,7 @@ on:
         description: "which case to exercise"
         type: choice
         default: skip
-        options: [skip, empty]
+        options: [skip, empty, run]
 
 jobs:
   plan:
@@ -29,7 +29,7 @@ jobs:
   a_named_skipped:
     name: ${{ matrix.leg.app }} -> ${{ matrix.leg.server }}
     needs: plan
-    if: ${{ false }}
+    if: ${{ inputs.mode == 'run' }}
     strategy:
       matrix:
         leg: ${{ fromJSON(needs.plan.outputs.legs) }}
@@ -39,7 +39,7 @@ jobs:
   # B: no custom name at all, skipped by if
   b_unnamed_skipped:
     needs: plan
-    if: ${{ false }}
+    if: ${{ inputs.mode == 'run' }}
     strategy:
       matrix:
         leg: ${{ fromJSON(needs.plan.outputs.legs) }}
