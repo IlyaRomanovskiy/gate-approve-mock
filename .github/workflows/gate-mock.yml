@@ -19,9 +19,9 @@ on:
         default: '-'
         options: &app_list
           - '-'
-          - app-alpha
-          - app-beta
-          - app-gamma
+          - demo-svc-accounts-sys
+          - demo-svc-payments-proc
+          - demo-svc-customer-exp
       app_2:
         description: "App 2"
         type: choice
@@ -33,8 +33,8 @@ on:
         default: '-'
         options: &server_list
           - '-'
-          - server-a
-          - server-b
+          - demo-internal-prod-1
+          - demo-internal-prod-2
       server_2:
         description: "Server 2"
         type: choice
