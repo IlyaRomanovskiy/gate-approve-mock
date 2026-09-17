@@ -112,11 +112,13 @@ jobs:
           fi
 
   gate_1:
-    name: Approve server 1
+    name: Approve deploy to ${{ fromJSON(needs.plan.outputs.servers_json)[0] }}
     needs: plan
     if: ${{ !inputs.dry_run && fromJSON(needs.plan.outputs.servers_json)[0] != null }}
     runs-on: ubuntu-latest
-    environment: batch-gate-test
+    environment:
+      name: batch-gate-test
+      url: https://example.invalid/node/${{ fromJSON(needs.plan.outputs.servers_json)[0] }}
     steps:
       - name: Approved
         run: echo "Server 1 (${{ fromJSON(needs.plan.outputs.servers_json)[0] }}) approved - in the real flow it must be out of the load balancer now."
@@ -138,11 +140,13 @@ jobs:
           sleep 20
 
   gate_2:
-    name: Approve server 2
+    name: Approve deploy to ${{ fromJSON(needs.plan.outputs.servers_json)[1] }}
     needs: [plan, deploy_1]
     if: ${{ !cancelled() && needs.deploy_1.result == 'success' && fromJSON(needs.plan.outputs.servers_json)[1] != null }}
     runs-on: ubuntu-latest
-    environment: batch-gate-test
+    environment:
+      name: batch-gate-test
+      url: https://example.invalid/node/${{ fromJSON(needs.plan.outputs.servers_json)[1] }}
     steps:
       - name: Approved
         run: echo "Server 2 (${{ fromJSON(needs.plan.outputs.servers_json)[1] }}) approved - in the real flow it must be out of the load balancer now."
