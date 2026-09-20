@@ -115,11 +115,12 @@ jobs:
           leg_fail=$(jq   'any(.[]; . == "failed")'  /tmp/legstatus.json)
           leg_cancel=$(jq 'any(.[]; . == "not run")' /tmp/legstatus.json)
 
-          if   [ "$leg_fail" = true ]   || [ "$gate_fail" = true ];   then RESULT=failure
+          nothing_ran=$(jq 'length == 0' /tmp/legstatus.json)
+
+          if   [ "$nothing_ran" = true ];                             then RESULT=nothing
+          elif [ "$leg_fail" = true ]   || [ "$gate_fail" = true ];   then RESULT=failure
           elif [ "$leg_cancel" = true ] || [ "$gate_cancel" = true ]; then RESULT=cancelled
           else RESULT=success; fi
-
-          nothing_ran=$(jq 'length == 0' /tmp/legstatus.json)
 
           echo "=== verdict ==="
           echo "attempt=$GITHUB_RUN_ATTEMPT leg_fail=$leg_fail leg_cancel=$leg_cancel gate_fail=$gate_fail gate_cancel=$gate_cancel"
@@ -135,3 +136,5 @@ jobs:
             echo "|---|---|"
             cat /tmp/legs.md
           } >> "$GITHUB_STEP_SUMMARY"
+
+          [ "$RESULT" = "success" ]
