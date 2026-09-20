@@ -1,0 +1,36 @@
+name: Mock leg
+
+# Called with `uses:` so the sub-job name carries " / " - the real report fold
+# keys legs off exactly that separator.
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        type: string
+        required: true
+      server:
+        type: string
+        required: true
+      fail:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pretend to deploy
+        env:
+          APP: ${{ inputs.app }}
+          SERVER: ${{ inputs.server }}
+          FAIL: ${{ inputs.fail }}
+        run: |
+          set -euo pipefail
+          echo "attempt=$GITHUB_RUN_ATTEMPT app=$APP server=$SERVER"
+          sleep 3
+          if [ "$FAIL" = "true" ]; then
+            echo "::error::leg failed on purpose"
+            exit 1
+          fi
