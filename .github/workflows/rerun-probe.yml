@@ -1,0 +1,137 @@
+name: Re-run semantics probe
+
+# What does "Re-run failed jobs" actually re-run when the downstream jobs are
+# guarded by `github.run_attempt == '1'`? GitHub does not document it, so measure it.
+# Same graph shape as the real batch: plan -> gate -> deploy(reusable) -> gate -> deploy -> report,
+# and the report folds the jobs API with the same jq. Synthetic names only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      fail_plan_on_attempt_1:
+        description: "plan fails on attempt 1, succeeds afterwards"
+        type: boolean
+        default: true
+      fail_leg_2:
+        description: "second leg fails"
+        type: boolean
+        default: false
+
+concurrency:
+  group: rerun-probe
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.p.outputs.legs }}
+    steps:
+      - name: Build the legs and maybe fail
+        id: p
+        env:
+          FAILP: ${{ inputs.fail_plan_on_attempt_1 }}
+        run: |
+          set -euo pipefail
+          echo "::notice::plan runs on attempt $GITHUB_RUN_ATTEMPT"
+          legs='[{"app":"app-alpha","server":"server-a","sha":"1111111aaaaaaaa"},{"app":"app-alpha","server":"server-b","sha":"1111111aaaaaaaa"}]'
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          if [ "$FAILP" = "true" ] && [ "$GITHUB_RUN_ATTEMPT" = "1" ]; then
+            echo "::error::plan fails on attempt 1 (stands in for the ARM check refusing)"
+            exit 1
+          fi
+
+  gate_1:
+    name: Approve deploy to server-a
+    needs: plan
+    if: ${{ github.run_attempt == '1' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gate 1 ran on attempt $GITHUB_RUN_ATTEMPT"
+
+  deploy_1:
+    name: app-alpha → server-a
+    needs: [plan, gate_1]
+    if: ${{ github.run_attempt == '1' }}
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: app-alpha
+      server: server-a
+
+  gate_2:
+    name: Approve deploy to server-b
+    needs: [plan, deploy_1]
+    if: ${{ github.run_attempt == '1' && needs.deploy_1.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "gate 2 ran on attempt $GITHUB_RUN_ATTEMPT"
+
+  deploy_2:
+    name: app-alpha → server-b
+    needs: [plan, gate_2]
+    if: ${{ github.run_attempt == '1' }}
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: app-alpha
+      server: server-b
+      fail: ${{ inputs.fail_leg_2 }}
+
+  report:
+    name: Report
+    needs: [plan, deploy_1, deploy_2]
+    if: ${{ always() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Fold the jobs API exactly like the real report does
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LEGS: ${{ needs.plan.outputs.legs }}
+        run: |
+          set -euo pipefail
+
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+             --jq '.jobs[] | {n: .name, c: .conclusion}' | jq -s '.' > /tmp/jobs.json
+          echo "=== what the jobs API returns on attempt $GITHUB_RUN_ATTEMPT ==="
+          jq -r '.[] | "  \(.n) | \(.c)"' /tmp/jobs.json
+
+          jq '
+              map(select((.n | contains(" / ")) and ((.n | contains("slack")) | not)))
+            | map(.n |= (split(" / ")[0]))
+            | group_by(.n)
+            | map({key: .[0].n,
+                   value: (if   any(.[]; .c == "failure")   then "failed"
+                           elif any(.[]; .c == "cancelled") then "not run"
+                           elif all(.[]; .c == "success" or .c == "skipped") then "deployed"
+                           else "in progress" end)})
+            | from_entries' /tmp/jobs.json > /tmp/legstatus.json
+          echo "=== legstatus fold ==="
+          cat /tmp/legstatus.json
+
+          gate_fail=$(jq   '[.[] | select(.n | startswith("Approve ")) | .c] | any(. == "failure")'   /tmp/jobs.json)
+          gate_cancel=$(jq '[.[] | select(.n | startswith("Approve ")) | .c] | any(. == "cancelled")' /tmp/jobs.json)
+          leg_fail=$(jq   'any(.[]; . == "failed")'  /tmp/legstatus.json)
+          leg_cancel=$(jq 'any(.[]; . == "not run")' /tmp/legstatus.json)
+
+          if   [ "$leg_fail" = true ]   || [ "$gate_fail" = true ];   then RESULT=failure
+          elif [ "$leg_cancel" = true ] || [ "$gate_cancel" = true ]; then RESULT=cancelled
+          else RESULT=success; fi
+
+          nothing_ran=$(jq 'length == 0' /tmp/legstatus.json)
+
+          echo "=== verdict ==="
+          echo "attempt=$GITHUB_RUN_ATTEMPT leg_fail=$leg_fail leg_cancel=$leg_cancel gate_fail=$gate_fail gate_cancel=$gate_cancel"
+          echo "RESULT=$RESULT   (proposed guard nothing_ran=$nothing_ran)"
+
+          jq -r --slurpfile s /tmp/legstatus.json '
+              .[] | "| \(.app) → \(.server) | \($s[0]["\(.app) → \(.server)"] // "not run") |"' <<<"$LEGS" > /tmp/legs.md
+
+          {
+            echo "## attempt $GITHUB_RUN_ATTEMPT - Result: $RESULT (nothing_ran=$nothing_ran)"
+            echo
+            echo "| Deployment | Outcome |"
+            echo "|---|---|"
+            cat /tmp/legs.md
+          } >> "$GITHUB_STEP_SUMMARY"
