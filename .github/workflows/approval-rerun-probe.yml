@@ -1,0 +1,30 @@
+name: Approval re-run probe
+
+# Does a re-run ask for the environment approval again, or does it reuse the
+# approval given on attempt 1? GitHub does not document this. No run_attempt
+# guard here on purpose - this is the shape of the rollback prod gate.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "plan on attempt $GITHUB_RUN_ATTEMPT"
+
+  gate:
+    name: Approve wave
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: batch-gate-test
+    steps:
+      - run: echo "GATE PASSED on attempt $GITHUB_RUN_ATTEMPT"
+
+  deploy:
+    name: Deploy
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "DEPLOYED on attempt $GITHUB_RUN_ATTEMPT"
