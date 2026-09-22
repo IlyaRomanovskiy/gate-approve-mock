@@ -1,0 +1,55 @@
+name: Sub-job carry probe 2
+
+# The real shape of a partially-deployed prod wave: the `uses:` job SUCCEEDS on
+# attempt 1 and is guarded by run_attempt == '1', so on attempt 2 it skips.
+# Do its attempt-1 sub-job rows survive in filter=latest, or does the skipped
+# caller row replace them?
+
+on:
+  workflow_dispatch:
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "plan attempt $GITHUB_RUN_ATTEMPT"
+
+  deploy:
+    name: app-alpha → server-a
+    needs: plan
+    if: ${{ github.run_attempt == '1' }}
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: app-alpha
+      server: server-a
+
+  breaker:
+    name: Breaker
+    needs: [plan, deploy]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [ "$GITHUB_RUN_ATTEMPT" = "1" ]; then
+            echo "failing on attempt 1 so the wave stops here"; exit 1
+          fi
+          echo "green on attempt $GITHUB_RUN_ATTEMPT"
+
+  report:
+    name: Report
+    needs: [plan, deploy, breaker]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          echo "=== attempt $GITHUB_RUN_ATTEMPT, filter=latest ==="
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | "  \(.name) | \(.conclusion)"'
+          n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+               --jq '[.jobs[] | select(.name | contains(" / "))] | length')
+          echo "SUBJOBS_WITH_SLASH=$n"
