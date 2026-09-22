@@ -1,0 +1,48 @@
+name: Sub-job carry probe
+
+# Does a reusable-workflow sub-job that succeeded on attempt 1 and was NOT re-run
+# still appear in runs/{id}/jobs?filter=latest on attempt 2? The report job folds
+# exactly that list, so the answer decides whether a partial re-run can wrongly
+# report "nothing was deployed".
+
+on:
+  workflow_dispatch:
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "plan attempt $GITHUB_RUN_ATTEMPT"
+
+  deploy:
+    name: app-alpha → server-a
+    needs: plan
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: app-alpha
+      server: server-a
+
+  report:
+    name: Report
+    needs: [plan, deploy]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Show what the jobs API returns
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          echo "=== attempt $GITHUB_RUN_ATTEMPT, filter=latest (what the real report uses) ==="
+          gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+            --jq '.jobs[] | "  \(.name) | \(.conclusion)"'
+          n=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" \
+               --jq '[.jobs[] | select(.name | contains(" / "))] | length')
+          echo "SUBJOBS_WITH_SLASH=$n"
+          if [ "$GITHUB_RUN_ATTEMPT" = "1" ]; then
+            echo "failing on purpose so only Report is re-run"
+            exit 1
+          fi
