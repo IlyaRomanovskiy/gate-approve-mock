@@ -1,0 +1,70 @@
+name: Sub-job re-run guard probe
+
+# When a reusable-workflow SUB-job fails and someone re-runs it ("Re-run failed jobs"
+# or the sub-job's own re-run), does GitHub re-evaluate the CALLER's `if:`? If not, a
+# `github.run_attempt == '1'` guard on the caller does not stop the re-run.
+# Two caller shapes: a plain `uses:` (rollback prod gate) and a matrix `uses:` (batch).
+# Synthetic names only; nothing is deployed anywhere.
+
+on:
+  workflow_dispatch:
+    inputs:
+      guard:
+        description: "guard the approve job and both callers with run_attempt == '1'"
+        type: boolean
+        default: true
+
+concurrency:
+  group: subjob-guard-probe
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "preflight on attempt $GITHUB_RUN_ATTEMPT"
+
+  approve:
+    name: Approve rollback
+    needs: preflight
+    if: ${{ github.run_attempt == '1' || !inputs.guard }}
+    runs-on: ubuntu-latest
+    environment: batch-gate-test
+    steps:
+      - run: echo "APPROVE PASSED on attempt $GITHUB_RUN_ATTEMPT"
+
+  rollback:
+    name: Rollback
+    needs: [preflight, approve]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.approve.result == 'success' && (github.run_attempt == '1' || !inputs.guard) }}
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: app-alpha
+      server: server-prod
+      fail: true
+
+  wave:
+    name: ${{ matrix.leg }} → server-prod
+    needs: [preflight, approve]
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.approve.result == 'success' && (github.run_attempt == '1' || !inputs.guard) }}
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        leg: [app-beta]
+    uses: ./.github/workflows/leg.yml
+    with:
+      app: ${{ matrix.leg }}
+      server: server-prod
+      fail: true
+
+  record:
+    name: Record
+    needs: [preflight, approve, rollback, wave]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "attempt=$GITHUB_RUN_ATTEMPT guard=${{ inputs.guard }}"
+          echo "preflight=${{ needs.preflight.result }} approve=${{ needs.approve.result }} rollback=${{ needs.rollback.result }} wave=${{ needs.wave.result }}"
